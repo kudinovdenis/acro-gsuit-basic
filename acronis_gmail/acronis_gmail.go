@@ -6,13 +6,16 @@ import (
 	"io/ioutil"
 	"os"
 
+	sched "git.acronis.com/scm/~alexander.gazarov/robust-networking"
 	"github.com/kudinovdenis/logger"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"net/http"
 	"net/http/httputil"
 	"strconv"
+	"time"
 )
 
 type LoggingTransport struct {
@@ -44,13 +47,82 @@ func (transport *LoggingTransport) RoundTrip(req *http.Request) (*http.Response,
 	return response, nil
 }
 
+const (
+	throttlingChannelId   = "Gmail"
+	bucketIdPerDay        = "PerDay"
+	bucketIdPer100Seconds = "Per100Seconds"
+)
+
+const costMessagesList = 5
+const costMessagesGet = 5
+const costMessagesInsert = 25
+
+var costMapMessagesList = map[sched.BucketId]int{bucketIdPerDay: costMessagesList}
+var costMapMessagesGet = map[sched.BucketId]int{bucketIdPerDay: costMessagesGet}
+var costMapMessagesInsert = map[sched.BucketId]int{bucketIdPerDay: costMessagesInsert}
+
 type GmailClient struct {
 	service       *gmail.Service
+	scheduler     sched.Scheduler
 	currentUserID string
+}
+
+type NetworkActionSequenceGenerator struct {
+	retryAction      sched.Action
+	maxRetries       int
+	errorStatusCodes map[int]struct{}
+}
+
+func (generator *NetworkActionSequenceGenerator) NewActionSequence(id sched.ThrottlingChannelId,
+	bucketCostMap map[sched.BucketId]int) sched.ActionSequence {
+	return &NetworkActionSequence{generator, 0}
+}
+
+func NewNetworkActionSequenceGenerator(delay time.Duration, maxRetries int, errorStatusCodes map[int]struct{}) *NetworkActionSequenceGenerator {
+	return &NetworkActionSequenceGenerator{
+		sched.Action{sched.ActionTypeRetry, delay}, maxRetries, errorStatusCodes,
+	}
+}
+
+type NetworkActionSequence struct {
+	generator *NetworkActionSequenceGenerator
+	retries   int
+}
+
+func (sequence *NetworkActionSequence) GetNextAction(result interface{}, err error) sched.Action {
+	if err != nil {
+		var errorCode int
+		if googleErr, ok := err.(*googleapi.Error); !ok {
+			return sched.ActionReturn
+		} else {
+			errorCode = googleErr.Code
+		}
+
+		if _, present := sequence.generator.errorStatusCodes[errorCode]; !present {
+			return sched.ActionReturn
+		}
+	}
+
+	sequence.retries += 1
+	if err == nil || sequence.retries > sequence.generator.maxRetries {
+		return sched.ActionReturn
+	} else {
+		return sequence.generator.retryAction
+	}
 }
 
 func Init(subject string) (*GmailClient, error) {
 	client := GmailClient{}
+
+	throttlingConfig := map[sched.ThrottlingChannelId]sched.ThrottlingChannelConfig{throttlingChannelId: {
+		map[sched.BucketId]sched.BucketConfig{
+			bucketIdPerDay:        {TimePeriod: 24 * time.Hour, MaxUnits: 1000000000},
+			bucketIdPer100Seconds: {TimePeriod: 100 * time.Second, MaxUnits: 2000000},
+		},
+		&sched.BucketConfig{TimePeriod: 100 * time.Second, MaxUnits: 25000},
+	}}
+	actionSequenceGenerator := NewNetworkActionSequenceGenerator(1*time.Second, 10, map[int]struct{}{500: {}})
+	client.scheduler = sched.NewScheduler(sched.Policy{throttlingConfig, actionSequenceGenerator})
 
 	httpClient := &http.Client{}
 	httpClient.Transport = &LoggingTransport{
@@ -148,7 +220,11 @@ func (client *GmailClient) BackupIndividualMessages(account string) (err error) 
 			listCall.PageToken(nextPageToken)
 		}
 
-		messages, err := listCall.Do()
+		result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
+			return listCall.Do(googleapi.QuotaUser(account))
+		}, throttlingChannelId, costMapMessagesGet, account, costMessagesGet)
+		messages := result.(*gmail.ListMessagesResponse)
+
 		if err != nil {
 			logger.Logf(logger.LogLevelError, "Message list Get failed , %v", err)
 			return err
@@ -180,7 +256,12 @@ func (client *GmailClient) saveMessage(account, pathToBackup, messageId string) 
 	logger.Logf(logger.LogLevelDefault, "Started message w/ ID : %v", messageId)
 	mc := client.service.Users.Messages.Get(account, messageId)
 	mc = mc.Format("raw")
-	m, err := mc.Do()
+
+	result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
+		return mc.Do(googleapi.QuotaUser(account))
+	}, throttlingChannelId, costMapMessagesList, account, costMessagesList)
+	m := result.(*gmail.Message)
+
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Message Get failed , %v", err)
 		return 0, err
@@ -202,7 +283,7 @@ func (client *GmailClient) saveMessage(account, pathToBackup, messageId string) 
 
 func (client *GmailClient) writeLatestHistoryId(account string, latestHistoryId uint64) error {
 	data := []byte(strconv.FormatUint(latestHistoryId, 10))
-	return ioutil.WriteFile("./backups/gmail/" + account + "/backup.json", data, os.ModePerm)
+	return ioutil.WriteFile("./backups/gmail/"+account+"/backup.json", data, os.ModePerm)
 }
 
 func (client *GmailClient) Restore(account string, pathToBackup string) (err error) {
@@ -288,14 +369,18 @@ func (client *GmailClient) restoreMessage(account string, pathToMsg string) (mes
 
 	ic := client.service.Users.Messages.Insert(account, m)
 
-	res, err := ic.Do()
+	result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
+		return ic.Do(googleapi.QuotaUser(account))
+	}, throttlingChannelId, costMapMessagesInsert, account, costMessagesInsert)
+	message := result.(*gmail.Message)
+
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Failed to restore message path: %v, err: %v", pathToMsg, err.Error())
 		return "", err
 	}
 
-	logger.Logf(logger.LogLevelDefault, "Inserted msg: %v", res)
-	messageId = res.Id
+	logger.Logf(logger.LogLevelDefault, "Inserted msg: %v", message)
+	messageId = message.Id
 	return
 }
 
