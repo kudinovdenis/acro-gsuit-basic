@@ -19,13 +19,12 @@ const gmailTestEmail = "monica.geller@trueimage.eu"
 var errors = []error{}
 
 func GmailToGmail() {
-
 	gb, err := acronis_gmail.Init("ao@dkudinov.com")
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Failed to Create service backup ao, err: %v", err.Error())
 	}
 
-	err = gb.Backup("ao@dkudinov.com")
+	err = gb.Backup()
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Failed to backup, err: %v", err.Error())
 	}
@@ -34,11 +33,10 @@ func GmailToGmail() {
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Failed to Create service backup to, err: %v", err.Error())
 	}
-	err = gr.Restore("to@dkudinov.com", "./ao@dkudinov.com/backup/")
+	err = gr.Restore("./ao@dkudinov.com/backup/")
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Failed to resotre, err: %v", err.Error())
 	}
-
 }
 
 func clientHandler(rw http.ResponseWriter, r *http.Request) {
@@ -117,7 +115,7 @@ func gmailBackupHandler(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	err = client.BackupIndividualMessages(gmailTestEmail)
+	err = client.Backup()
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
@@ -132,7 +130,7 @@ func gmailIncrementalBackupHandler(writer http.ResponseWriter, request *http.Req
 	}
 
 	baseFolder := "./backups/gmail/" + gmailTestEmail
-	err = client.BackupIncrementally(gmailTestEmail, baseFolder+"/backup/", baseFolder+"/backup.json")
+	err = client.BackupIncrementally(baseFolder+"/backup/", baseFolder+"/backup.json")
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
@@ -146,7 +144,7 @@ func gmailRestoreHandler(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	err = client.RestoreIndividualMessages(gmailTestEmail, "./backups/gmail/"+gmailTestEmail+"/backup")
+	err = client.Restore("./backups/gmail/" + gmailTestEmail + "/backup")
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return

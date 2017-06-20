@@ -6,33 +6,21 @@ import (
 
 const email = "monica.geller@trueimage.eu"
 
-func TestGmailClient_Backup(t *testing.T) {
-	testBackup(t, func(client *GmailClient, account string) error {
-		return client.Backup(account)
-	})
-}
-
-func TestGmailClient_Restore(t *testing.T) {
-	testRestore(t, func(client *GmailClient, account, pathToBackup string) error {
-		return client.Restore(email, "./"+email+"/backup/")
-	})
-}
-
 func TestGmailClient_BackupIndividualMessages(t *testing.T) {
 	testBackup(t, func(client *GmailClient, account string) error {
-		return client.BackupIndividualMessages(account)
+		return client.Backup()
 	})
 }
 
 func TestGmailClient_BackupIncrementally(t *testing.T) {
 	testBackup(t, func(client *GmailClient, account string) error {
-		return client.BackupIncrementally(account, "./"+email+"/backup", "./"+email+"/backup.json")
+		return client.BackupIncrementally( "./"+email+"/backup", "./"+email+"/backup.json")
 	})
 }
 
 func TestGmailClient_RestoreIndividualMessages(t *testing.T) {
 	testRestore(t, func(client *GmailClient, account, pathToBackup string) error {
-		return client.RestoreIndividualMessages(email, "./"+email+"/backup")
+		return client.Restore("./"+email+"/backup")
 	})
 }
 

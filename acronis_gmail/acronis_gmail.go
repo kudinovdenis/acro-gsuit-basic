@@ -62,9 +62,9 @@ var costMapMessagesGet = map[sched.BucketId]int{bucketIdPerDay: costMessagesGet}
 var costMapMessagesInsert = map[sched.BucketId]int{bucketIdPerDay: costMessagesInsert}
 
 type GmailClient struct {
-	service       *gmail.Service
-	scheduler     sched.Scheduler
-	currentUserID string
+	service   *gmail.Service
+	scheduler sched.Scheduler
+	account   string
 }
 
 type NetworkActionSequenceGenerator struct {
@@ -111,8 +111,9 @@ func (sequence *NetworkActionSequence) GetNextAction(result interface{}, err err
 	}
 }
 
-func Init(subject string) (*GmailClient, error) {
+func Init(account string) (*GmailClient, error) {
 	client := GmailClient{}
+	client.account = account
 
 	throttlingConfig := map[sched.ThrottlingChannelId]sched.ThrottlingChannelConfig{throttlingChannelId: {
 		map[sched.BucketId]sched.BucketConfig{
@@ -132,19 +133,19 @@ func Init(subject string) (*GmailClient, error) {
 	ctx := context.Background()
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
-	b, err := ioutil.ReadFile("./Acronis-backup-project-8b80e5be7c37.json")
+	jsonData, err := ioutil.ReadFile("./Acronis-backup-project-8b80e5be7c37.json")
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := google.JWTConfigFromJSON(b, gmail.GmailModifyScope)
+	data, err := google.JWTConfigFromJSON(jsonData, gmail.GmailModifyScope)
 
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "JWT Config failed, %v", err)
 		return nil, err
 	}
 
-	data.Subject = subject
+	data.Subject = account
 
 	client.service, err = gmail.New(data.Client(ctx))
 	if err != nil {
@@ -155,50 +156,8 @@ func Init(subject string) (*GmailClient, error) {
 	return &client, nil
 }
 
-func (client *GmailClient) Backup(account string) (err error) {
-	threads, err := client.service.Users.Threads.List(account).Do()
-	if err != nil {
-		logger.Logf(logger.LogLevelError, "Threads List failed , %v", err)
-		return
-	}
-
-	logger.Logf(logger.LogLevelDefault, "%v", len(threads.Threads))
-
-	for _, thread := range threads.Threads {
-		logger.Logf(logger.LogLevelDefault, "Started thread w/ ID : %v", thread.Id)
-		logger.Logf(logger.LogLevelDefault, "Thread snippet : %s ", thread.Snippet)
-
-		pathToBackup := "./backups/gmail/" + account + "/backup/" + string(thread.Id) + "/"
-		err = os.MkdirAll(pathToBackup, 0777)
-		if err != nil {
-			logger.Logf(logger.LogLevelError, "Directory create failed, %v", err)
-			return
-		}
-
-		tc := client.service.Users.Threads.Get(account, thread.Id) //.Do()//service.Threads.Get(subject, thread.Id).Do()
-		tc = tc.Format("metadata")
-		t, err := tc.Do()
-		if err != nil {
-			logger.Logf(logger.LogLevelError, "Thread Get failed , %v", err)
-			return err
-		}
-		logger.Logf(logger.LogLevelDefault, "Getted Thread Snippet : %s", t.Snippet)
-		logger.Logf(logger.LogLevelDefault, "Getted Thread Message Count %v", len(t.Messages))
-
-		for _, mes := range t.Messages {
-			_, err := client.saveMessage(account, pathToBackup, mes.Id)
-			if err != nil {
-				return err
-			}
-		}
-		logger.Logf(logger.LogLevelDefault, "Ended thread w/ ID : %v", thread.Id)
-	}
-
-	return
-}
-
-func (client *GmailClient) BackupIndividualMessages(account string) (err error) {
-	pathToBackup := "./backups/gmail/" + account + "/backup/"
+func (client *GmailClient) Backup() (err error) {
+	pathToBackup := "./backups/gmail/" + client.account + "/backup/"
 
 	err = os.RemoveAll(pathToBackup)
 	if err != nil {
@@ -215,14 +174,14 @@ func (client *GmailClient) BackupIndividualMessages(account string) (err error) 
 	nextPageToken := ""
 	var latestHistoryId uint64
 	for {
-		listCall := client.service.Users.Messages.List(account)
+		listCall := client.service.Users.Messages.List(client.account)
 		if nextPageToken != "" {
 			listCall.PageToken(nextPageToken)
 		}
 
 		result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
-			return listCall.Do(googleapi.QuotaUser(account))
-		}, throttlingChannelId, costMapMessagesGet, account, costMessagesGet)
+			return listCall.Do(googleapi.QuotaUser(client.account))
+		}, throttlingChannelId, costMapMessagesGet, client.account, costMessagesGet)
 		messages := result.(*gmail.ListMessagesResponse)
 
 		if err != nil {
@@ -232,7 +191,7 @@ func (client *GmailClient) BackupIndividualMessages(account string) (err error) 
 		logger.Logf(logger.LogLevelDefault, "Got Message Count %v", len(messages.Messages))
 
 		for _, mes := range messages.Messages {
-			historyId, err := client.saveMessage(account, pathToBackup, mes.Id)
+			historyId, err := client.saveMessage(pathToBackup, mes.Id)
 			if err != nil {
 				return err
 			}
@@ -249,17 +208,17 @@ func (client *GmailClient) BackupIndividualMessages(account string) (err error) 
 	}
 
 	logger.Logf(logger.LogLevelDefault, "Latest history id: %d", latestHistoryId)
-	return client.writeLatestHistoryId(account, latestHistoryId)
+	return client.writeLatestHistoryId(latestHistoryId)
 }
 
-func (client *GmailClient) saveMessage(account, pathToBackup, messageId string) (uint64, error) {
+func (client *GmailClient) saveMessage(pathToBackup, messageId string) (uint64, error) {
 	logger.Logf(logger.LogLevelDefault, "Started message w/ ID : %v", messageId)
-	mc := client.service.Users.Messages.Get(account, messageId)
+	mc := client.service.Users.Messages.Get(client.account, messageId)
 	mc = mc.Format("raw")
 
 	result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
-		return mc.Do(googleapi.QuotaUser(account))
-	}, throttlingChannelId, costMapMessagesList, account, costMessagesList)
+		return mc.Do(googleapi.QuotaUser(client.account))
+	}, throttlingChannelId, costMapMessagesList, client.account, costMessagesList)
 	m := result.(*gmail.Message)
 
 	if err != nil {
@@ -281,63 +240,37 @@ func (client *GmailClient) saveMessage(account, pathToBackup, messageId string) 
 	return m.HistoryId, nil
 }
 
-func (client *GmailClient) writeLatestHistoryId(account string, latestHistoryId uint64) error {
+func (client *GmailClient) writeLatestHistoryId(latestHistoryId uint64) error {
 	data := []byte(strconv.FormatUint(latestHistoryId, 10))
-	return ioutil.WriteFile("./backups/gmail/"+account+"/backup.json", data, os.ModePerm)
+	return ioutil.WriteFile("./backups/gmail/"+client.account+"/backup.json", data, os.ModePerm)
 }
 
-func (client *GmailClient) Restore(account string, pathToBackup string) (err error) {
-	d, err := os.Open(pathToBackup)
-	if err != nil {
-		logger.Logf(logger.LogLevelError, "Directory open failed, %v", err)
-		return
-	}
-	defer d.Close()
-	fi, err := d.Readdir(-1)
-	if err != nil {
-		logger.Logf(logger.LogLevelError, "Directory open failed, %v", err)
-		return
-	}
-	for _, fi := range fi {
-
-		if fi.IsDir() {
-			logger.Logf(logger.LogLevelDefault, "Found dir: %v", fi.Name())
-			_, err = client.restoreThread(account, pathToBackup+fi.Name())
-			if err != nil {
-				logger.Logf(logger.LogLevelError, "Failed to restore thread if: %v, err: %v", fi.Name(), err.Error())
-			}
-		}
-	}
-
-	return
-}
-
-func (client *GmailClient) RestoreIndividualMessages(account, pathToBackup string) error {
-	latestHistoryId, err := client.restoreThread(account, pathToBackup)
+func (client *GmailClient) Restore(pathToBackup string) error {
+	latestHistoryId, err := client.restoreMessages(pathToBackup)
 	if err != nil {
 		return err
 	}
 
-	return client.writeLatestHistoryId(account, latestHistoryId)
+	return client.writeLatestHistoryId(latestHistoryId)
 }
 
-func (client *GmailClient) restoreThread(account string, pathToThread string) (latestHistoryId uint64, err error) {
-	fileList, err := createExistingFileList(pathToThread)
+func (client *GmailClient) restoreMessages(pathToBackup string) (latestHistoryId uint64, err error) {
+	fileList, err := createExistingFileList(pathToBackup)
 	if err != nil {
-		logger.Logf(logger.LogLevelError, "Failed to create file list: %v, err: %v", pathToThread, err.Error())
+		logger.Logf(logger.LogLevelError, "Failed to create file list: %v, err: %v", pathToBackup, err.Error())
 		return
 	}
 
 	var lastMessageId string
 	for _, fileName := range fileList {
-		lastMessageId, err = client.restoreMessage(account, pathToThread+"/"+fileName)
+		lastMessageId, err = client.restoreMessage(pathToBackup+"/"+fileName)
 		if err != nil {
 			logger.Logf(logger.LogLevelError, "Failed to restore thread id: %v, err: %v", fileName, err.Error())
 			return
 		}
 	}
 
-	message, err := client.service.Users.Messages.Get(account, lastMessageId).Format("metadata").Do()
+	message, err := client.service.Users.Messages.Get(client.account, lastMessageId).Format("metadata").Do()
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Message Get failed , %v", err)
 		return 0, err
@@ -347,7 +280,7 @@ func (client *GmailClient) restoreThread(account string, pathToThread string) (l
 	return
 }
 
-func (client *GmailClient) restoreMessage(account string, pathToMsg string) (messageId string, err error) {
+func (client *GmailClient) restoreMessage(pathToMsg string) (messageId string, err error) {
 	raw, err := ioutil.ReadFile(pathToMsg)
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Failed to restore message path: %v, err: %v", pathToMsg, err.Error())
@@ -367,11 +300,11 @@ func (client *GmailClient) restoreMessage(account string, pathToMsg string) (mes
 	m.LabelIds = msg.LabelIds
 	m.ThreadId = msg.ThreadId
 
-	ic := client.service.Users.Messages.Insert(account, m)
+	ic := client.service.Users.Messages.Insert(client.account, m)
 
 	result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
-		return ic.Do(googleapi.QuotaUser(account))
-	}, throttlingChannelId, costMapMessagesInsert, account, costMessagesInsert)
+		return ic.Do(googleapi.QuotaUser(client.account))
+	}, throttlingChannelId, costMapMessagesInsert, client.account, costMessagesInsert)
 	message := result.(*gmail.Message)
 
 	if err != nil {
@@ -384,7 +317,7 @@ func (client *GmailClient) restoreMessage(account string, pathToMsg string) (mes
 	return
 }
 
-func (client *GmailClient) BackupIncrementally(account, pathToBackup, pathToBackupDescriptor string) error {
+func (client *GmailClient) BackupIncrementally(pathToBackup, pathToBackupDescriptor string) error {
 	data, err := ioutil.ReadFile(pathToBackupDescriptor)
 	if err != nil {
 		return err
@@ -396,10 +329,10 @@ func (client *GmailClient) BackupIncrementally(account, pathToBackup, pathToBack
 		return err
 	}
 
-	return client.backupIncrementally(account, pathToBackup, lastHistoryId)
+	return client.backupIncrementally(pathToBackup, lastHistoryId)
 }
 
-func (client *GmailClient) backupIncrementally(account, pathToBackup string, lastHistoryId uint64) error {
+func (client *GmailClient) backupIncrementally(pathToBackup string, lastHistoryId uint64) error {
 	existingMessages, err := createExistingFileList(pathToBackup)
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Failed to create file list: %v, err: %v", pathToBackup, err.Error())
@@ -411,7 +344,7 @@ func (client *GmailClient) backupIncrementally(account, pathToBackup string, las
 		existingMessagesSet[message] = struct{}{}
 	}
 
-	statuses, err := client.createChangeSetFromHistory(account, lastHistoryId, existingMessagesSet)
+	statuses, err := client.createChangeSetFromHistory(lastHistoryId, existingMessagesSet)
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Couldn't create a status list, err: %v", err.Error())
 		return err
@@ -421,7 +354,7 @@ func (client *GmailClient) backupIncrementally(account, pathToBackup string, las
 		logger.Logf(logger.LogLevelDefault, "Message %s: %d", message, status)
 		switch status {
 		case statusAdded:
-			client.saveMessage(account, pathToBackup, message)
+			client.saveMessage(pathToBackup, message)
 		case statusRemoved:
 			os.Remove(pathToBackup + "/" + message)
 		}

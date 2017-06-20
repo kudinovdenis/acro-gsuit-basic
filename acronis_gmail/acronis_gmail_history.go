@@ -9,11 +9,11 @@ const (
 
 type Status int
 
-func (client *GmailClient) createChangeSetFromHistory(account string, lastHistoryId uint64,
+func (client *GmailClient) createChangeSetFromHistory(lastHistoryId uint64,
 	existingMessagesInBackup map[string]struct{}) (map[string]Status, error) {
 	statuses := make(map[string]Status)
 
-	response, err := client.service.Users.History.List(account).StartHistoryId(lastHistoryId).Do()
+	response, err := client.service.Users.History.List(client.account).StartHistoryId(lastHistoryId).Do()
 	if err != nil {
 		return nil, err
 	}
