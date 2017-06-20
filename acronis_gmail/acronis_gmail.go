@@ -181,13 +181,14 @@ func (client *GmailClient) Backup() (err error) {
 
 		result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
 			return listCall.Do(googleapi.QuotaUser(client.account))
-		}, throttlingChannelId, costMapMessagesGet, client.account, costMessagesGet)
-		messages := result.(*gmail.ListMessagesResponse)
+		}, throttlingChannelId, costMapMessagesList, client.account, costMessagesList)
 
 		if err != nil {
 			logger.Logf(logger.LogLevelError, "Message list Get failed , %v", err)
 			return err
 		}
+
+		messages := result.(*gmail.ListMessagesResponse)
 		logger.Logf(logger.LogLevelDefault, "Got Message Count %v", len(messages.Messages))
 
 		for _, mes := range messages.Messages {
@@ -218,13 +219,14 @@ func (client *GmailClient) saveMessage(pathToBackup, messageId string) (uint64, 
 
 	result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
 		return mc.Do(googleapi.QuotaUser(client.account))
-	}, throttlingChannelId, costMapMessagesList, client.account, costMessagesList)
-	m := result.(*gmail.Message)
+	}, throttlingChannelId, costMapMessagesGet, client.account, costMessagesGet)
 
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Message Get failed , %v", err)
 		return 0, err
 	}
+
+	m := result.(*gmail.Message)
 	logger.Logf(logger.LogLevelDefault, "Message snippet : %s", m.Snippet)
 
 	marshalled, err := m.MarshalJSON()
@@ -270,13 +272,17 @@ func (client *GmailClient) restoreMessages(pathToBackup string) (latestHistoryId
 		}
 	}
 
-	message, err := client.service.Users.Messages.Get(client.account, lastMessageId).Format("metadata").Do()
+	messageCall := client.service.Users.Messages.Get(client.account, lastMessageId).Format("metadata")
+	result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
+		return messageCall.Do(googleapi.QuotaUser(client.account))
+	}, throttlingChannelId, costMapMessagesGet, client.account, costMessagesGet)
+
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Message Get failed , %v", err)
 		return 0, err
 	}
 
-	latestHistoryId = message.HistoryId
+	latestHistoryId = result.(*gmail.Message).HistoryId
 	return
 }
 
@@ -305,13 +311,13 @@ func (client *GmailClient) restoreMessage(pathToMsg string) (messageId string, e
 	result, err := client.scheduler.CallWithCostAndDynamicId(func(interface{}, error) (interface{}, error) {
 		return ic.Do(googleapi.QuotaUser(client.account))
 	}, throttlingChannelId, costMapMessagesInsert, client.account, costMessagesInsert)
-	message := result.(*gmail.Message)
 
 	if err != nil {
 		logger.Logf(logger.LogLevelError, "Failed to restore message path: %v, err: %v", pathToMsg, err.Error())
 		return "", err
 	}
 
+	message := result.(*gmail.Message)
 	logger.Logf(logger.LogLevelDefault, "Inserted msg: %v", message)
 	messageId = message.Id
 	return
